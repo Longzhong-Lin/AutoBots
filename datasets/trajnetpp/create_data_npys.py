@@ -73,6 +73,7 @@ def get_args():
 
 def prepare_data(raw_path, out_path):
     N = 6
+    os.makedirs(out_path, exist_ok=True)
     files = [f.split('.')[-2] for f in os.listdir(raw_path) if f.endswith('.ndjson')]
     for file in files:
         reader = trajnetplusplustools.Reader(raw_path + file + '.ndjson', scene_type='tags')

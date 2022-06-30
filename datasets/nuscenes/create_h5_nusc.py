@@ -4,7 +4,7 @@ import h5py
 import os
 import numpy as np
 
-from datasets.nuscenes.raw_dataset import NuScenesDataset
+from raw_dataset import NuScenesDataset
 
 
 '''
@@ -29,7 +29,7 @@ if __name__ == '__main__':
     args = get_args()
     max_num_agents = 20
 
-    save_dir = os.path.join(args.output_h5_path, args.split_name)
+    os.makedirs(args.output_h5_path, exist_ok=True)
     nuscenes = NuScenesDataset(data_root=args.raw_dataset_path, split_name=args.split_name,
                                version='v1.0-trainval', ego_range=args.ego_range, num_others=max_num_agents)
     num_scenes = len(nuscenes)

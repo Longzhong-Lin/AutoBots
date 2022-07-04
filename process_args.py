@@ -18,7 +18,7 @@ def get_train_args():
                         help="Dataset to train on.")
     parser.add_argument("--dataset-path", type=str, required=True, help="Path to dataset files.")
     parser.add_argument("--use-map-image", type=bool, default=False, help="Use map image if applicable.")
-    parser.add_argument("--use-map-lanes", type=bool, default=False, help="Use map lanes if applicable.")
+    parser.add_argument("--use-map-lanes", action="store_true", help="Use map lanes if applicable.")
 
     # Section: Algorithm
     parser.add_argument("--model-type", type=str, required=True, choices=["Autobot-Joint", "Autobot-Ego"],
@@ -37,7 +37,7 @@ def get_train_args():
     # Section: Loss Function
     parser.add_argument("--entropy-weight", type=float, default=1.0, metavar="lamda", help="Weight of entropy loss.")
     parser.add_argument("--kl-weight", type=float, default=1.0, metavar="lamda", help="Weight of entropy loss.")
-    parser.add_argument("--use-FDEADE-aux-loss", type=bool, default=True,
+    parser.add_argument("--use-FDEADE-aux-loss", action="store_true",
                         help="Whether to use FDE/ADE auxiliary loss in addition to NLL (accelerates learning).")
 
     # Section: Training params:

@@ -14,7 +14,7 @@ from models.autobot_ego import AutoBotEgo
 import torch
 import torch.distributions as D
 from torch import optim, nn
-from torch.optim.lr_scheduler import MultiStepLR
+from torch.optim.lr_scheduler import MultiStepLR, CosineAnnealingLR
 from torch.utils.tensorboard import SummaryWriter
 
 from utils.metric_helpers import min_xde_K
@@ -38,8 +38,13 @@ class Trainer:
         self.initialize_model()
         self.optimiser = optim.Adam(self.autobot_model.parameters(), lr=self.args.learning_rate,
                                     eps=self.args.adam_epsilon)
-        self.optimiser_scheduler = MultiStepLR(self.optimiser, milestones=args.learning_rate_sched, gamma=0.5,
+        self.optimiser_scheduler = MultiStepLR(self.optimiser, milestones=args.learning_rate_sched, gamma=0.1,
                                                verbose=True)
+        # self.optimiser_scheduler = CosineAnnealingLR(
+        #     self.optimiser,
+        #     T_max=self.args.num_epochs,
+        #     verbose=True
+        # )
 
         self.writer = SummaryWriter(log_dir=os.path.join(self.results_dirname, "tb_files"))
         self.smallest_minade_k = 5.0  # for computing best models
@@ -55,7 +60,7 @@ class Trainer:
                                          use_map_lanes=self.args.use_map_lanes)
 
         elif "interaction-dataset" in self.args.dataset:
-            train_dset = InteractionDataset(dset_path=self.args.dataset_path, split_name="train",
+            train_dset = InteractionDataset(dset_path=self.args.dataset_path, split_name="full",
                                             use_map_lanes=self.args.use_map_lanes, evaluation=False)
             val_dset = InteractionDataset(dset_path=self.args.dataset_path, split_name="val",
                                           use_map_lanes=self.args.use_map_lanes, evaluation=False)
@@ -127,14 +132,15 @@ class Trainer:
 
     def _data_to_device(self, data):
         if "Joint" in self.args.model_type:
-            ego_in, ego_out, agents_in, agents_out, context_img, agent_types = data
+            ego_in, ego_out, agents_in, agents_out, context_img, agent_types, relative_pose = data
             ego_in = ego_in.float().to(self.device)
             ego_out = ego_out.float().to(self.device)
             agents_in = agents_in.float().to(self.device)
             agents_out = agents_out.float().to(self.device)
             context_img = context_img.float().to(self.device)
             agent_types = agent_types.float().to(self.device)
-            return ego_in, ego_out, agents_in, agents_out, context_img, agent_types
+            relative_pose = relative_pose.float().to(self.device)
+            return ego_in, ego_out, agents_in, agents_out, context_img, agent_types, relative_pose
 
         elif "Ego" in self.args.model_type:
             ego_in, ego_out, agents_in, roads = data
@@ -297,8 +303,8 @@ class Trainer:
             epoch_scene_fde_losses = []
             epoch_mode_probs = []
             for i, data in enumerate(self.train_loader):
-                ego_in, ego_out, agents_in, agents_out, map_lanes, agent_types = self._data_to_device(data)
-                pred_obs, mode_probs = self.autobot_model(ego_in, agents_in, map_lanes, agent_types)
+                ego_in, ego_out, agents_in, agents_out, map_lanes, agent_types, relative_pose = self._data_to_device(data)
+                pred_obs, mode_probs = self.autobot_model(ego_in, agents_in, map_lanes, agent_types, relative_pose)
 
                 nll_loss, kl_loss, post_entropy, adefde_loss = \
                     nll_loss_multimodes_joint(pred_obs, ego_out, agents_out, mode_probs,
@@ -316,6 +322,7 @@ class Trainer:
                 self.writer.add_scalar("Loss/nll", nll_loss.item(), steps)
                 self.writer.add_scalar("Loss/adefde", adefde_loss.item(), steps)
                 self.writer.add_scalar("Loss/kl", kl_loss.item(), steps)
+                self.writer.add_scalar("lr", self.optimiser_scheduler.get_last_lr()[-1], steps)
 
                 with torch.no_grad():
                     ade_losses, fde_losses = self._compute_marginal_errors(pred_obs, ego_out, agents_out, agents_in)
@@ -372,8 +379,8 @@ class Trainer:
             val_scene_fde_losses = []
             val_mode_probs = []
             for i, data in enumerate(self.val_loader):
-                ego_in, ego_out, agents_in, agents_out, context_img, agent_types = self._data_to_device(data)
-                pred_obs, mode_probs = self.autobot_model(ego_in, agents_in, context_img, agent_types)
+                ego_in, ego_out, agents_in, agents_out, context_img, agent_types, relative_pose = self._data_to_device(data)
+                pred_obs, mode_probs = self.autobot_model(ego_in, agents_in, context_img, agent_types, relative_pose)
 
                 # Marginal metrics
                 ade_losses, fde_losses = self._compute_marginal_errors(pred_obs, ego_out, agents_out, agents_in)

@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from models.context_encoders import MapEncoderPtsMA
+from models.layers import SocialAttention
 
 
 def init(module, weight_init, bias_init, gain=1):
@@ -110,6 +111,7 @@ class AutoBotJoint(nn.Module):
             tx_encoder_layer = nn.TransformerEncoderLayer(d_model=self.d_k, nhead=self.num_heads,
                                                           dropout=self.dropout, dim_feedforward=self.tx_hidden_size)
             self.social_attn_layers.append(nn.TransformerEncoder(tx_encoder_layer, num_layers=1))
+            # self.social_attn_layers.append(SocialAttention(dim=self.d_k, num_heads=self.num_heads, dropout=self.dropout))
 
         self.temporal_attn_layers = nn.ModuleList(self.temporal_attn_layers)
         self.social_attn_layers = nn.ModuleList(self.social_attn_layers)
@@ -192,7 +194,7 @@ class AutoBotJoint(nn.Module):
                                 src_key_padding_mask=agent_masks)
         return agents_temp_emb.view(T_obs, B, self._M+1, -1)
 
-    def social_attn_fn(self, agents_emb, agent_masks, layer):
+    def social_attn_fn(self, agents_emb, agent_masks, relative_pose, layer):
         '''
         :param agents_emb: (T, B, N, H)
         :param agent_masks: (B, T, N)
@@ -203,6 +205,11 @@ class AutoBotJoint(nn.Module):
         agents_emb = agents_emb.permute(2, 1, 0, 3).reshape(self._M + 1, B * T_obs, -1)
         agents_soc_emb = layer(agents_emb, src_key_padding_mask=agent_masks.view(-1, self._M+1))
         agents_soc_emb = agents_soc_emb.view(self._M+1, B, T_obs, -1).permute(2, 1, 0, 3)
+        # agents_emb = agents_emb.permute(2, 1, 0, 3).reshape(self._M + 1, B * T_obs, -1).transpose(0, 1)
+        # if relative_pose is not None:
+        #     relative_pose = relative_pose.reshape(B*T_obs, self._M + 1, self._M + 1, 4)
+        # agents_soc_emb = layer(agents_emb, mask=agent_masks.view(-1, self._M+1), relation=relative_pose)
+        # agents_soc_emb = agents_soc_emb.transpose(0, 1).view(self._M+1, B, T_obs, -1).permute(2, 1, 0, 3)
         return agents_soc_emb
 
     def temporal_attn_decoder_fn(self, agents_emb, context, agent_masks, layer):
@@ -238,7 +245,7 @@ class AutoBotJoint(nn.Module):
         agents_soc_emb = agents_soc_emb.view(self._M + 1, B, self.T, -1).permute(2, 1, 0, 3)
         return agents_soc_emb
 
-    def forward(self, ego_in, agents_in, roads, agent_types):
+    def forward(self, ego_in, agents_in, roads, agent_types, relative_pose=None):
         '''
         :param ego_in: one agent called ego, shape [B, T_obs, k_attr+1] with last values being the existence mask.
         :param agents_in: other scene agents, shape [B, T_obs, M-1, k_attr+1] with last values being the existence mask.
@@ -260,7 +267,7 @@ class AutoBotJoint(nn.Module):
         # Process through AutoBot's encoder
         for i in range(self.L_enc):
             agents_emb = self.temporal_attn_fn(agents_emb, opps_masks, layer=self.temporal_attn_layers[i])
-            agents_emb = self.social_attn_fn(agents_emb, opps_masks, layer=self.social_attn_layers[i])
+            agents_emb = self.social_attn_fn(agents_emb, opps_masks, relative_pose, layer=self.social_attn_layers[i])
 
         # Process map information
         if self.use_map_lanes:

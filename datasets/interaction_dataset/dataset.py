@@ -1,6 +1,8 @@
 import xml.etree.ElementTree as xml
 import h5py
 import os
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 import glob
 import matplotlib.pyplot as plt
 from sklearn.metrics import euclidean_distances
@@ -268,7 +270,27 @@ class InteractionDataset(Dataset):
                 coordinates=new_roads[n + 1, :, :, :2] - translation, yaw=angle_of_rotation)
             new_roads[n + 1][np.where(new_roads[n + 1, :, :, -1] == 0)] = 0.0
 
-        return new_ego_in, new_ego_out, new_agents_in, new_agents_out, new_roads
+        # relative position
+        agents_in_all = np.concatenate((agents_in, np.expand_dims(ego_in, 0)), axis=0)
+        A, T, _ = agents_in_all.shape
+        relative_pose = np.zeros((T, A, A, 4), dtype=np.float32)
+        for t in range(T):
+            for a in range(A):
+                if not agents_in_all[a, t, -1]:
+                    continue
+                if agent_types[a, 0]: # vehicle
+                    yaw = agents_in_all[a, t, 4]
+                elif agent_types[a, 1]: # pedestrian/bike
+                    diff = agents_in_all[a, t, 2:4]
+                    yaw = np.arctan2(diff[1], diff[0])
+                angle_of_rotation = (np.pi / 2) + np.sign(-yaw) * np.abs(yaw)
+                translation = agents_in_all[a, t, :2]
+                relative_pose[t, a, :, :2] = self.convert_global_coords_to_local(coordinates=agents_in_all[:, t, :2]-translation, yaw=angle_of_rotation)
+                direction = np.arctan2(agents_in_all[:, t, 3], agents_in_all[:, t, 2])
+                relative_pose[t, a, :, 2] = np.cos(direction - yaw)
+                relative_pose[t, a, :, 3] = np.sin(direction - yaw)
+
+        return new_ego_in, new_ego_out, new_agents_in, new_agents_out, new_roads, relative_pose
 
     def _plot_debug(self, ego_in, ego_out, agents_in, agents_out, roads):
         for n in range(self.num_others + 1):
@@ -310,7 +332,7 @@ class InteractionDataset(Dataset):
         # normalize scenes so all agents are going up
         if self.evaluation:
             translations = np.concatenate((ego_in[-1:, :2], agents_in[:, -1, :2]), axis=0)
-        ego_in, ego_out, agents_in, agents_out, roads = self.rotate_agents(ego_in, ego_out, agents_in, agents_out,
+        ego_in, ego_out, agents_in, agents_out, roads, relative_pose = self.rotate_agents(ego_in, ego_out, agents_in, agents_out,
                                                                            roads, agent_types)
         if not self.use_map_lanes:
             roads = np.zeros_like(roads, dtype=np.float32)
@@ -344,7 +366,11 @@ class InteractionDataset(Dataset):
             # Experimentally found that global information actually hurts performance.
             ego_in[:, 3:5] = 0.0
             agents_in[:, :, 3:5] = 0.0
-            return ego_in, ego_out, agents_in.transpose(1, 0, 2), agents_out.transpose(1, 0, 2), roads, agent_types
+            return ego_in, ego_out, agents_in.transpose(1, 0, 2), agents_out.transpose(1, 0, 2), roads, agent_types, relative_pose
 
     def __len__(self):
         return self.dset_len
+
+if __name__ == "__main__":
+    dset = InteractionDataset(dset_path=os.path.join(os.path.dirname(__file__), "data/multi_agent"), split_name="val", evaluation=False)
+    dset[0]

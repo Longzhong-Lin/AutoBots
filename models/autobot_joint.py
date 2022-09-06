@@ -78,7 +78,7 @@ class AutoBotJoint(nn.Module):
     AutoBot-Joint Class.
     '''
     def __init__(self, d_k=128, _M=5, c=5, T=30, L_enc=1, dropout=0.0, k_attr=2, map_attr=3, num_heads=16, L_dec=1,
-                 tx_hidden_size=384, use_map_lanes=False, num_agent_types=None, predict_yaw=False):
+                 tx_hidden_size=384, use_map_lanes=False, num_agent_types=None, predict_yaw=False, marginal=False):
         super(AutoBotJoint, self).__init__()
 
         init_ = lambda m: init(m, nn.init.xavier_normal_, lambda x: nn.init.constant_(x, 0), np.sqrt(2))
@@ -96,6 +96,7 @@ class AutoBotJoint(nn.Module):
         self.tx_hidden_size = tx_hidden_size
         self.use_map_lanes = use_map_lanes
         self.predict_yaw = predict_yaw
+        self.marginal = marginal
 
         # INPUT ENCODERS
         self.agents_dynamic_encoder = nn.Sequential(init_(nn.Linear(self.k_attr, self.d_k)))
@@ -315,9 +316,13 @@ class AutoBotJoint(nn.Module):
             mode_params_emb = self.mode_map_attn(query=mode_params_emb, key=orig_map_features, value=orig_map_features,
                                                  key_padding_mask=orig_road_segs_masks)[0] + mode_params_emb
 
-        mode_probs = self.prob_predictor(mode_params_emb).squeeze(-1).view(self.c, B, self._M+1).sum(2).transpose(0, 1)
-        mode_probs = F.softmax(mode_probs, dim=1)
+        if self.marginal:
+            mode_probs = self.prob_predictor(mode_params_emb).squeeze(-1).view(self.c, B, self._M+1)
+            mode_probs = F.softmax(mode_probs, dim=0)
+        else:
+            mode_probs = self.prob_predictor(mode_params_emb).squeeze(-1).view(self.c, B, self._M+1).sum(2).transpose(0, 1)
+            mode_probs = F.softmax(mode_probs, dim=1)
 
-        # return  # [c, T, B, M, 5], [B, c]
+        # [c, T, B, M, 5], [c, B, M] / [B, c]
         return out_dists, mode_probs
 

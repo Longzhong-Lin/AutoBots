@@ -282,7 +282,7 @@ def visualize_all_agents_traj(
         ax.scatter(
             masked_x, masked_y,
             marker='.', linewidths=3, color=colors,
-            alpha=1-t/(num_history_steps+num_future_steps)/2
+            alpha=1-t/(num_history_steps+num_future_steps)/1.2
         )
     for t in range(num_future_steps):
         masked_x = future_states[:, t, 0][future_mask[:, t]]
@@ -291,7 +291,7 @@ def visualize_all_agents_traj(
         ax.scatter(
             masked_x, masked_y,
             marker='x', linewidths=3, color=colors,
-            alpha=1-(t+num_history_steps)/(num_history_steps+num_future_steps)/2
+            alpha=1-(t+num_history_steps)/(num_history_steps+num_future_steps)/1.2
         )
     # Title.
     ax.set_title(topic)

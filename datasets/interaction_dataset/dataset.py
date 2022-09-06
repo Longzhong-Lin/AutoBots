@@ -328,6 +328,14 @@ class InteractionDataset(Dataset):
         ego_in, ego_out, agents_in, agents_out, agent_types = self.split_input_output_normalize(agents_data, meta_data,
                                                                                                 agent_types)
         roads = self.copy_agent_roads_across_agents(agents_in, roads)
+        if idx == 7777 and False:
+            # print(ego_in.shape, ego_out.shape, agents_in.shape, agents_out.shape)
+            ego_in[:, 0] = agents_out[0, 10, 0]
+            ego_in[:, 1] = agents_out[0, 10, 1]
+            ego_in[:, 2:5] = 0
+            ego_out[:, 0] = agents_out[0, 10, 0]
+            ego_out[:, 1] = agents_out[0, 10, 1]
+            ego_out[:, 2] = 0
 
         # normalize scenes so all agents are going up
         if self.evaluation:
@@ -352,6 +360,7 @@ class InteractionDataset(Dataset):
         if self.evaluation:
             ego_in = ego_in[1::2]
             agents_in = agents_in[:, 1::2]
+            relative_pose = relative_pose[1::2]
             model_ego_in = ego_in.copy()
             model_ego_in[:, 3:5] = 0.0
             ego_in[:, 0:2] = ego_in[:, 3:5]
@@ -361,7 +370,7 @@ class InteractionDataset(Dataset):
             ego_out[:, 0:2] = ego_out[:, 2:4]  # putting the original coordinate systems
             agents_out[:, :, 0:2] = agents_out[:, :, 2:4]  # putting the original coordinate systems
             return model_ego_in, ego_out, model_agents_in.transpose(1, 0, 2), agents_out.transpose(1, 0, 2), roads, \
-                   agent_types, ego_in, agents_in.transpose(1, 0, 2), original_roads, translations
+                   agent_types, relative_pose, ego_in, agents_in.transpose(1, 0, 2), original_roads, translations
         else:
             # Experimentally found that global information actually hurts performance.
             ego_in[:, 3:5] = 0.0

@@ -1,6 +1,8 @@
+import os
 import random
 import numpy as np
 import torch
+from matplotlib import pyplot as plt
 from datasets.argoverse.dataset import ArgoH5Dataset
 from datasets.interaction_dataset.dataset import InteractionDataset
 from datasets.nuscenes.dataset import NuscenesH5Dataset
@@ -9,6 +11,7 @@ from models.autobot_ego import AutoBotEgo
 from models.autobot_joint import AutoBotJoint
 from process_args import get_eval_args
 from utils.metric_helpers import min_xde_K, yaw_from_predictions, interpolate_trajectories, collisions_for_inter_dataset
+from utils.visualize import visualize_all_agents_traj
 
 
 class Evaluator:
@@ -51,6 +54,7 @@ class Evaluator:
         else:
             raise NotImplementedError
 
+        self.val_dset = val_dset
         self.num_other_agents = val_dset.num_others
         self.pred_horizon = val_dset.pred_horizon
         self.k_attr = val_dset.k_attr
@@ -96,7 +100,8 @@ class Evaluator:
                                               use_map_lanes=self.model_config.use_map_lanes,
                                               map_attr=self.map_attr,
                                               num_agent_types=self.num_agent_types,
-                                              predict_yaw=self.predict_yaw).to(self.device)
+                                              predict_yaw=self.predict_yaw,
+                                              marginal=self.model_config.marginal).to(self.device)
         else:
             raise NotImplementedError
 
@@ -110,14 +115,15 @@ class Evaluator:
 
     def _data_to_device(self, data):
         if "Joint" in self.model_config.model_type:
-            ego_in, ego_out, agents_in, agents_out, context_img, agent_types = data
+            ego_in, ego_out, agents_in, agents_out, context_img, agent_types, relative_pose = data
             ego_in = ego_in.float().to(self.device)
             ego_out = ego_out.float().to(self.device)
             agents_in = agents_in.float().to(self.device)
             agents_out = agents_out.float().to(self.device)
             context_img = context_img.float().to(self.device)
             agent_types = agent_types.float().to(self.device)
-            return ego_in, ego_out, agents_in, agents_out, context_img, agent_types
+            relative_pose = relative_pose.float().to(self.device)
+            return ego_in, ego_out, agents_in, agents_out, context_img, agent_types, relative_pose
 
         elif "Ego" in self.model_config.model_type:
             ego_in, ego_out, agents_in, roads = data
@@ -181,8 +187,8 @@ class Evaluator:
                 if self.interact_eval:
                     # for the interaction dataset, we have multiple outputs that we use to interpolate, rotate and
                     # compute scene collisions almost like they do.
-                    orig_ego_in, orig_agents_in, original_roads, translations = data[6:]
-                    data = data[:6]
+                    orig_ego_in, orig_agents_in, original_roads, translations = data[-4:]
+                    data = data[:-4]
                     orig_ego_in = orig_ego_in.float().to(self.device)
                     orig_agents_in = orig_agents_in.float().to(self.device)
 
@@ -234,6 +240,111 @@ class Evaluator:
                 total_collisions = np.concatenate(total_collisions).mean()
                 print("Scene Collision Rate", total_collisions)
 
+    def autobotjoint_visualize(self, index):
+        with torch.no_grad():
+            val_marg_ade_losses = []
+            val_marg_fde_losses = []
+            val_marg_mode_probs = []
+            val_scene_ade_losses = []
+            val_scene_fde_losses = []
+            val_mode_probs = []
+            
+            data = self.val_dset[index]
+            data = [torch.from_numpy(d).unsqueeze(0) for d in data]
+            if self.interact_eval:
+                # for the interaction dataset, we have multiple outputs that we use to interpolate, rotate and
+                # compute scene collisions almost like they do.
+                orig_ego_in, orig_agents_in, original_roads, translations = data[-4:]
+                data = data[:-4]
+                orig_ego_in = orig_ego_in.float().to(self.device)
+                orig_agents_in = orig_agents_in.float().to(self.device)
+
+            ego_in, ego_out, agents_in, agents_out, context_img, agent_types, relative_pose = self._data_to_device(data)
+            pred_obs, mode_probs = self.autobot_model(ego_in, agents_in, context_img, agent_types, relative_pose)
+
+            if self.interact_eval:
+                pred_obs = interpolate_trajectories(pred_obs)
+                pred_obs = yaw_from_predictions(pred_obs, orig_ego_in, orig_agents_in)
+                scene_collisions, pred_obs, vehicles_only = collisions_for_inter_dataset(pred_obs.cpu().numpy(),
+                                                                                            agent_types.cpu().numpy(),
+                                                                                            orig_ego_in.cpu().numpy(),
+                                                                                            orig_agents_in.cpu().numpy(),
+                                                                                            translations.cpu().numpy(),
+                                                                                            device=self.device)
+            agent_history = torch.cat((orig_ego_in, orig_agents_in[0].transpose(0, 1)), dim=0)[..., [-1, 0, 1]].cpu().numpy()
+            agent_future = torch.cat((ego_out, agents_out[0].transpose(0, 1)), dim=0)[:, 1::2, [-1, 0, 1]].cpu().numpy()
+            roadgraph = original_roads.view(-1, self.map_attr+1)[:, [-1, 0, 1]].cpu().numpy()
+            center = np.mean(roadgraph[roadgraph[..., 0]==1.0], axis=0)
+            pred_image = []
+            for m in range(pred_obs.shape[0]):
+                agent_predict = pred_obs[m, 1::2, 0, :, [-1, 0, 1]].transpose(0, 1).cpu().numpy()
+                agent_predict[..., 0] = 1.0
+                if self.model_config.marginal:
+                    image = visualize_all_agents_traj(
+                        agent_history, agent_predict, roadgraph, topic=f'c0:{mode_probs[m,0,0]:.2f}',
+                        center_x=center[1], center_y=center[2], width=150.0
+                    )
+                else:
+                    image = visualize_all_agents_traj(
+                        agent_history, agent_predict, roadgraph, topic=f'c:{mode_probs[0,m]:.2f}',
+                        center_x=center[1], center_y=center[2], width=150.0
+                    )
+                pred_image.append(image)
+            fig, ax = plt.subplots(nrows=3, ncols=3, figsize=(15, 15))
+            gt_image = visualize_all_agents_traj(
+                agent_history, agent_future, roadgraph, topic='gt',
+                center_x=center[1], center_y=center[2], width=150.0
+            )
+            ax[0, 1].imshow(gt_image)
+            for col in range(ax.shape[1]):
+                    ax[0, col].set_xticks([])
+                    ax[0, col].set_yticks([])
+                    ax[0, col].grid('off')
+            for idx, image in enumerate(pred_image):
+                row = 1+(idx//ax.shape[1])
+                col = idx%ax.shape[1]
+                ax[row, col].imshow(image)
+                ax[row, col].set_xticks([])
+                ax[row, col].set_yticks([])
+                ax[row, col].grid('off')
+            os.makedirs(os.path.join(self.model_dirname, 'visual'), exist_ok=True)
+            plt.savefig(os.path.join(self.model_dirname, f'visual/test_{index}.png'), dpi=300)
+
+            # Marginal metrics
+            ade_losses, fde_losses = self._compute_marginal_errors(pred_obs, ego_out, agents_out, agents_in)
+            val_marg_ade_losses.append(ade_losses.reshape(-1, self.model_config.num_modes))
+            val_marg_fde_losses.append(fde_losses.reshape(-1, self.model_config.num_modes))
+            if self.model_config.marginal:
+                val_marg_mode_probs.append(
+                    mode_probs.detach().cpu().numpy().reshape(self.model_config.num_modes, -1).transpose()
+                )
+            else:    
+                val_marg_mode_probs.append(
+                    mode_probs.unsqueeze(1).repeat(1, self.num_other_agents + 1, 1).detach().cpu().numpy().reshape(
+                        -1, self.model_config.num_modes))
+            # Joint metrics
+            if not self.model_config.marginal:
+                scene_ade_losses, scene_fde_losses = self._compute_joint_errors(pred_obs, ego_out, agents_out)
+                val_scene_ade_losses.append(scene_ade_losses)
+                val_scene_fde_losses.append(scene_fde_losses)
+                val_mode_probs.append(mode_probs.detach().cpu().numpy())
+
+            val_marg_ade_losses = np.concatenate(val_marg_ade_losses)
+            val_marg_fde_losses = np.concatenate(val_marg_fde_losses)
+            val_marg_mode_probs = np.concatenate(val_marg_mode_probs)
+            val_minade_c = min_xde_K(val_marg_ade_losses, val_marg_mode_probs, K=self.model_config.num_modes)
+            val_minfde_c = min_xde_K(val_marg_fde_losses, val_marg_mode_probs, K=self.model_config.num_modes)
+            print("Marg. minADE c:", val_minade_c[0], "Marg. minFDE c:", val_minfde_c[0])
+
+            if not self.model_config.marginal:
+                val_scene_ade_losses = np.concatenate(val_scene_ade_losses)
+                val_scene_fde_losses = np.concatenate(val_scene_fde_losses)
+                val_mode_probs = np.concatenate(val_mode_probs)
+                val_sminade_c = min_xde_K(val_scene_ade_losses, val_mode_probs, K=self.model_config.num_modes)
+                val_sminfde_c = min_xde_K(val_scene_fde_losses, val_mode_probs, K=self.model_config.num_modes)
+                print("Scene minADE c:", val_sminade_c[0], "Scene minFDE c:", val_sminfde_c[0])
+                print("Scene Collision Rate", scene_collisions)
+
     def autobotego_evaluate(self):
         with torch.no_grad():
             val_ade_losses = []
@@ -273,8 +384,18 @@ class Evaluator:
         else:
             raise NotImplementedError
 
+    def visualize(self, index=0):
+        if "Joint" in self.model_config.model_type:
+            self.autobotjoint_visualize(index)
+        else:
+            raise NotImplementedError
 
 if __name__ == '__main__':
     args, config, model_dirname = get_eval_args()
     evaluator = Evaluator(args, config, model_dirname)
-    evaluator.evaluate()
+    # evaluator.evaluate()
+    # for i in range(50):
+    #     index = random.randint(0, 11793)
+    #     print(f"plot {index} >>>>>>>>>")
+    #     evaluator.visualize(index)
+    evaluator.visualize(index=8644)

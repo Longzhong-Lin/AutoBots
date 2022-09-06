@@ -21,6 +21,7 @@ def get_train_args():
     parser.add_argument("--use-map-lanes", action="store_true", help="Use map lanes if applicable.")
 
     # Section: Algorithm
+    parser.add_argument("--marginal", action="store_true", help="Marginal prediction.")
     parser.add_argument("--model-type", type=str, required=True, choices=["Autobot-Joint", "Autobot-Ego"],
                         help="Whether to train for joint prediction or ego-only prediction.")
     parser.add_argument("--num-modes", type=int, default=5, help="Number of discrete latent variables for Autobot.")
@@ -91,6 +92,7 @@ def create_results_folder(args):
     model_configname += "_NormLoss" if args.use_FDEADE_aux_loss else ""
     model_configname += "_roadImg" if args.use_map_image else ""
     model_configname += "_roadLanes" if args.use_map_lanes else ""
+    model_configname += "_marginal" if args.marginal else ""
     if args.exp_id is not None:
         model_configname += ("_" + args.exp_id)
     model_configname += "_s"+str(args.seed)

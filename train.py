@@ -18,7 +18,7 @@ from torch.optim.lr_scheduler import MultiStepLR, CosineAnnealingLR
 from torch.utils.tensorboard import SummaryWriter
 
 from utils.metric_helpers import min_xde_K
-from utils.train_helpers import nll_loss_multimodes, nll_loss_multimodes_joint
+from utils.train_helpers import nll_loss_multimodes, nll_loss_multimodes_joint, nll_loss_multimodes_marginal
 
 
 class Trainer:
@@ -60,7 +60,7 @@ class Trainer:
                                          use_map_lanes=self.args.use_map_lanes)
 
         elif "interaction-dataset" in self.args.dataset:
-            train_dset = InteractionDataset(dset_path=self.args.dataset_path, split_name="full",
+            train_dset = InteractionDataset(dset_path=self.args.dataset_path, split_name="train",
                                             use_map_lanes=self.args.use_map_lanes, evaluation=False)
             val_dset = InteractionDataset(dset_path=self.args.dataset_path, split_name="val",
                                           use_map_lanes=self.args.use_map_lanes, evaluation=False)
@@ -126,7 +126,8 @@ class Trainer:
                                               use_map_lanes=self.args.use_map_lanes,
                                               map_attr=self.map_attr,
                                               num_agent_types=self.num_agent_types,
-                                              predict_yaw=self.predict_yaw).to(self.device)
+                                              predict_yaw=self.predict_yaw,
+                                              marginal=self.args.marginal).to(self.device)
         else:
             raise NotImplementedError
 
@@ -306,13 +307,22 @@ class Trainer:
                 ego_in, ego_out, agents_in, agents_out, map_lanes, agent_types, relative_pose = self._data_to_device(data)
                 pred_obs, mode_probs = self.autobot_model(ego_in, agents_in, map_lanes, agent_types, relative_pose)
 
-                nll_loss, kl_loss, post_entropy, adefde_loss = \
-                    nll_loss_multimodes_joint(pred_obs, ego_out, agents_out, mode_probs,
-                                              entropy_weight=self.args.entropy_weight,
-                                              kl_weight=self.args.kl_weight,
-                                              use_FDEADE_aux_loss=self.args.use_FDEADE_aux_loss,
-                                              agent_types=agent_types,
-                                              predict_yaw=self.predict_yaw)
+                if self.args.marginal:
+                    nll_loss, kl_loss, post_entropy, adefde_loss = \
+                        nll_loss_multimodes_marginal(pred_obs, ego_out, agents_out, mode_probs,
+                                                entropy_weight=self.args.entropy_weight,
+                                                kl_weight=self.args.kl_weight,
+                                                use_FDEADE_aux_loss=self.args.use_FDEADE_aux_loss,
+                                                agent_types=agent_types,
+                                                predict_yaw=self.predict_yaw)
+                else:
+                    nll_loss, kl_loss, post_entropy, adefde_loss = \
+                        nll_loss_multimodes_joint(pred_obs, ego_out, agents_out, mode_probs,
+                                                entropy_weight=self.args.entropy_weight,
+                                                kl_weight=self.args.kl_weight,
+                                                use_FDEADE_aux_loss=self.args.use_FDEADE_aux_loss,
+                                                agent_types=agent_types,
+                                                predict_yaw=self.predict_yaw)
 
                 self.optimiser.zero_grad()
                 (nll_loss + adefde_loss + kl_loss).backward()
@@ -328,14 +338,20 @@ class Trainer:
                     ade_losses, fde_losses = self._compute_marginal_errors(pred_obs, ego_out, agents_out, agents_in)
                     epoch_marg_ade_losses.append(ade_losses.reshape(-1, self.args.num_modes))
                     epoch_marg_fde_losses.append(fde_losses.reshape(-1, self.args.num_modes))
-                    epoch_marg_mode_probs.append(
-                        mode_probs.unsqueeze(1).repeat(1, self.num_other_agents + 1, 1).detach().cpu().numpy().reshape(
-                            -1, self.args.num_modes))
+                    if self.args.marginal:
+                        epoch_marg_mode_probs.append(
+                            mode_probs.detach().cpu().numpy().reshape(self.args.num_modes, -1).transpose()
+                        )
+                    else:
+                        epoch_marg_mode_probs.append(
+                            mode_probs.unsqueeze(1).repeat(1, self.num_other_agents + 1, 1).detach().cpu().numpy().reshape(
+                                -1, self.args.num_modes))
 
-                    scene_ade_losses, scene_fde_losses = self._compute_joint_errors(pred_obs, ego_out, agents_out)
-                    epoch_scene_ade_losses.append(scene_ade_losses)
-                    epoch_scene_fde_losses.append(scene_fde_losses)
-                    epoch_mode_probs.append(mode_probs.detach().cpu().numpy())
+                    if not self.args.marginal:
+                        scene_ade_losses, scene_fde_losses = self._compute_joint_errors(pred_obs, ego_out, agents_out)
+                        epoch_scene_ade_losses.append(scene_ade_losses)
+                        epoch_scene_fde_losses.append(scene_fde_losses)
+                        epoch_mode_probs.append(mode_probs.detach().cpu().numpy())
 
                 if i % 10 == 0:
                     print(i, "/", len(self.train_loader.dataset)//self.args.batch_size,
@@ -348,26 +364,26 @@ class Trainer:
             epoch_marg_ade_losses = np.concatenate(epoch_marg_ade_losses)
             epoch_marg_fde_losses = np.concatenate(epoch_marg_fde_losses)
             epoch_marg_mode_probs = np.concatenate(epoch_marg_mode_probs)
-            epoch_scene_ade_losses = np.concatenate(epoch_scene_ade_losses)
-            epoch_scene_fde_losses = np.concatenate(epoch_scene_fde_losses)
-            mode_probs = np.concatenate(epoch_mode_probs)
             train_minade_c = min_xde_K(epoch_marg_ade_losses, epoch_marg_mode_probs, K=self.args.num_modes)
             train_minfde_c = min_xde_K(epoch_marg_fde_losses, epoch_marg_mode_probs, K=self.args.num_modes)
-            train_sminade_c = min_xde_K(epoch_scene_ade_losses, mode_probs, K=self.args.num_modes)
-            train_sminfde_c = min_xde_K(epoch_scene_fde_losses, mode_probs, K=self.args.num_modes)
-            print("Train Marg. minADE c:", train_minade_c[0], "Train Marg. minFDE c:", train_minfde_c[0], "\n",
-                  "Train Scene minADE c", train_sminade_c[0], "Train Scene minFDE c", train_sminfde_c[0])
-
-            # Log train metrics
+            print("Train Marg. minADE c:", train_minade_c[0], "Train Marg. minFDE c:", train_minfde_c[0])
             self.writer.add_scalar("metrics/Train Marg. minADE {}".format(self.args.num_modes), train_minade_c[0], epoch)
             self.writer.add_scalar("metrics/Train Marg. minFDE {}".format(self.args.num_modes), train_minfde_c[0], epoch)
-            self.writer.add_scalar("metrics/Train Scene minADE {}".format(self.args.num_modes), train_sminade_c[0], epoch)
-            self.writer.add_scalar("metrics/Train Scene minFDE {}".format(self.args.num_modes), train_sminfde_c[0], epoch)
+
+            if not self.args.marginal:
+                epoch_scene_ade_losses = np.concatenate(epoch_scene_ade_losses)
+                epoch_scene_fde_losses = np.concatenate(epoch_scene_fde_losses)
+                mode_probs = np.concatenate(epoch_mode_probs)
+                train_sminade_c = min_xde_K(epoch_scene_ade_losses, mode_probs, K=self.args.num_modes)
+                train_sminfde_c = min_xde_K(epoch_scene_fde_losses, mode_probs, K=self.args.num_modes)
+                print("Train Scene minADE c", train_sminade_c[0], "Train Scene minFDE c", train_sminfde_c[0])
+                self.writer.add_scalar("metrics/Train Scene minADE {}".format(self.args.num_modes), train_sminade_c[0], epoch)
+                self.writer.add_scalar("metrics/Train Scene minFDE {}".format(self.args.num_modes), train_sminfde_c[0], epoch)
 
             self.optimiser_scheduler.step()
             self.autobotjoint_evaluate(epoch)
             self.save_model(epoch)
-            print("Best Scene minADE c", self.smallest_minade_k, "Best Scene minFDE c", self.smallest_minfde_k)
+            print("Best minADE c", self.smallest_minade_k, "Best minFDE c", self.smallest_minfde_k)
 
     def autobotjoint_evaluate(self, epoch):
         self.autobot_model.eval()
@@ -386,40 +402,46 @@ class Trainer:
                 ade_losses, fde_losses = self._compute_marginal_errors(pred_obs, ego_out, agents_out, agents_in)
                 val_marg_ade_losses.append(ade_losses.reshape(-1, self.args.num_modes))
                 val_marg_fde_losses.append(fde_losses.reshape(-1, self.args.num_modes))
-                val_marg_mode_probs.append(
-                    mode_probs.unsqueeze(1).repeat(1, self.num_other_agents + 1, 1).detach().cpu().numpy().reshape(
-                        -1, self.args.num_modes))
+                if self.args.marginal:
+                    val_marg_mode_probs.append(
+                        mode_probs.detach().cpu().numpy().reshape(self.args.num_modes, -1).transpose()
+                    )
+                else:
+                    val_marg_mode_probs.append(
+                        mode_probs.unsqueeze(1).repeat(1, self.num_other_agents + 1, 1).detach().cpu().numpy().reshape(
+                            -1, self.args.num_modes))
 
                 # Joint metrics
-                scene_ade_losses, scene_fde_losses = self._compute_joint_errors(pred_obs, ego_out, agents_out)
-                val_scene_ade_losses.append(scene_ade_losses)
-                val_scene_fde_losses.append(scene_fde_losses)
-                val_mode_probs.append(mode_probs.detach().cpu().numpy())
+                if not self.args.marginal:
+                    scene_ade_losses, scene_fde_losses = self._compute_joint_errors(pred_obs, ego_out, agents_out)
+                    val_scene_ade_losses.append(scene_ade_losses)
+                    val_scene_fde_losses.append(scene_fde_losses)
+                    val_mode_probs.append(mode_probs.detach().cpu().numpy())
 
             val_marg_ade_losses = np.concatenate(val_marg_ade_losses)
             val_marg_fde_losses = np.concatenate(val_marg_fde_losses)
             val_marg_mode_probs = np.concatenate(val_marg_mode_probs)
-
-            val_scene_ade_losses = np.concatenate(val_scene_ade_losses)
-            val_scene_fde_losses = np.concatenate(val_scene_fde_losses)
-            val_mode_probs = np.concatenate(val_mode_probs)
-
             val_minade_c = min_xde_K(val_marg_ade_losses, val_marg_mode_probs, K=self.args.num_modes)
             val_minfde_c = min_xde_K(val_marg_fde_losses, val_marg_mode_probs, K=self.args.num_modes)
-            val_sminade_c = min_xde_K(val_scene_ade_losses, val_mode_probs, K=self.args.num_modes)
-            val_sminfde_c = min_xde_K(val_scene_fde_losses, val_mode_probs, K=self.args.num_modes)
-
-            # Log train metrics
             self.writer.add_scalar("metrics/Val Marg. minADE {}".format(self.args.num_modes), val_minade_c[0], epoch)
             self.writer.add_scalar("metrics/Val Marg. minFDE {}".format(self.args.num_modes), val_minfde_c[0], epoch)
-            self.writer.add_scalar("metrics/Val Scene minADE {}".format(self.args.num_modes), val_sminade_c[0], epoch)
-            self.writer.add_scalar("metrics/Val Scene minFDE {}".format(self.args.num_modes), val_sminfde_c[0], epoch)
-
             print("Marg. minADE c:", val_minade_c[0], "Marg. minFDE c:", val_minfde_c[0])
-            print("Scene minADE c:", val_sminade_c[0], "Scene minFDE c:", val_sminfde_c[0])
+
+            if not self.args.marginal:
+                val_scene_ade_losses = np.concatenate(val_scene_ade_losses)
+                val_scene_fde_losses = np.concatenate(val_scene_fde_losses)
+                val_mode_probs = np.concatenate(val_mode_probs)
+                val_sminade_c = min_xde_K(val_scene_ade_losses, val_mode_probs, K=self.args.num_modes)
+                val_sminfde_c = min_xde_K(val_scene_fde_losses, val_mode_probs, K=self.args.num_modes)
+                self.writer.add_scalar("metrics/Val Scene minADE {}".format(self.args.num_modes), val_sminade_c[0], epoch)
+                self.writer.add_scalar("metrics/Val Scene minFDE {}".format(self.args.num_modes), val_sminfde_c[0], epoch)
+                print("Scene minADE c:", val_sminade_c[0], "Scene minFDE c:", val_sminfde_c[0])
 
             self.autobot_model.train()
-            self.save_model(minade_k=val_sminade_c[0], minfde_k=val_sminfde_c[0])
+            if self.args.marginal:
+                self.save_model(minade_k=val_minade_c[0], minfde_k=val_minfde_c[0])
+            else:
+                self.save_model(minade_k=val_sminade_c[0], minfde_k=val_sminfde_c[0])
 
     def save_model(self, epoch=None, minade_k=None, minfde_k=None):
         if epoch is None:

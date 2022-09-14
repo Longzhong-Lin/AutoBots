@@ -2,6 +2,7 @@ import uuid
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+import matplotlib.patches as mpatches
 
 
 ####################################
@@ -302,6 +303,12 @@ def visualize_all_agents_traj(
         -size / 2 + center_y, size / 2 + center_y
     ])
     ax.set_aspect('equal')
+    # Color map legend
+    patches = []
+    for i in range(colors.shape[0]):
+        patch = mpatches.Patch(color=colors[i], label=i)
+        patches.append(patch)
+    fig.legend(handles=patches)
     image = fig_canvas_image(fig)
     plt.close(fig)
 

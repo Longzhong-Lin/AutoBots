@@ -284,8 +284,9 @@ class Evaluator:
             center = np.mean(roadgraph[roadgraph[..., 0]==1.0], axis=0)
             pred_image = []
             for m in range(pred_obs.shape[0]):
+                agent_mask = torch.cat((orig_ego_in, orig_agents_in[0].transpose(0, 1)), dim=0)[..., -1, -1]
                 agent_predict = pred_obs[m, 1::2, 0, :, [-1, 0, 1]].transpose(0, 1).cpu().numpy()
-                agent_predict[..., 0] = 1.0
+                agent_predict[..., 0] = agent_mask.unsqueeze(-1).cpu().numpy()
                 if self.model_config.marginal:
                     image = visualize_all_agents_traj(
                         agent_history, agent_predict, roadgraph, topic=f'c0:{mode_probs[m,0,0]:.2f}',
@@ -318,22 +319,19 @@ class Evaluator:
             plt.savefig(os.path.join(self.model_dirname, f'visual/test_{index}.png'), dpi=300)
 
             # Weights Heatmap
-            agent_mask = torch.cat((orig_ego_in, orig_agents_in[0].transpose(0, 1)), dim=0)[..., -1]
-            agent_mask = agent_mask.transpose(0, 1).unsqueeze(-1)#.repeat(1, 1, 41)
-            print(agent_mask)
+            agent_mask = torch.cat((orig_ego_in, orig_agents_in[0].transpose(0, 1)), dim=0)[..., -1, -1]
+            num_agents = int(agent_mask.sum().item())
 
             plt.figure()
-            sns.heatmap(torch.norm(relative_pose[0, -1, :4, :4, :2], dim=-1).cpu())
-            # print(relative_pose[0, -1, 6, 0, :2])
-            # print(relative_pose[0, -1, 0, 6, :2])
+            sns.heatmap(-torch.norm(relative_pose[0, -1, :num_agents, :num_agents, :2], dim=-1).cpu())
             plt.savefig(os.path.join(self.model_dirname, f'visual/test_{index}_rel_pos.png'), dpi=300)
 
             plt.figure()
-            sns.heatmap(w_soc_enc[0][0,-1].cpu())
+            sns.heatmap(w_soc_enc[0][0, -1, :num_agents, :num_agents].cpu())
             plt.savefig(os.path.join(self.model_dirname, f'visual/test_{index}_w_soc_enc.png'), dpi=300)
 
             plt.figure()
-            sns.heatmap(w_soc_dec[0][0,0,-1].cpu())
+            sns.heatmap(w_soc_dec[0][0, 0, -1, :num_agents, :num_agents].cpu())
             plt.savefig(os.path.join(self.model_dirname, f'visual/test_{index}_w_soc_dec_final.png'), dpi=300)
 
             # Marginal metrics
@@ -424,4 +422,4 @@ if __name__ == '__main__':
     #     index = random.randint(0, 11793)
     #     print(f"plot {index} >>>>>>>>>")
     #     evaluator.visualize(index)
-    evaluator.visualize(index=2222)
+    evaluator.visualize(index=8644)

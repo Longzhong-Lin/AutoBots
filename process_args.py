@@ -121,4 +121,6 @@ def load_config(model_path):
     assert os.path.isdir(model_dirname)
     with open(os.path.join(model_dirname, 'config.json'), 'r') as fp:
         config = json.load(fp)
+        if 'marginal' not in config:
+            config['marginal'] = False
     return config, model_dirname

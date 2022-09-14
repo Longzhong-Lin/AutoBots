@@ -271,7 +271,7 @@ class InteractionDataset(Dataset):
             new_roads[n + 1][np.where(new_roads[n + 1, :, :, -1] == 0)] = 0.0
 
         # relative position
-        agents_in_all = np.concatenate((agents_in, np.expand_dims(ego_in, 0)), axis=0)
+        agents_in_all = np.concatenate((np.expand_dims(ego_in, 0), agents_in), axis=0)
         A, T, _ = agents_in_all.shape
         relative_pose = np.zeros((T, A, A, 4), dtype=np.float32)
         for t in range(T):
@@ -342,6 +342,7 @@ class InteractionDataset(Dataset):
             translations = np.concatenate((ego_in[-1:, :2], agents_in[:, -1, :2]), axis=0)
         ego_in, ego_out, agents_in, agents_out, roads, relative_pose = self.rotate_agents(ego_in, ego_out, agents_in, agents_out,
                                                                            roads, agent_types)
+        relative_pose[:-1] = relative_pose[-1] # take only current relative pose
         if not self.use_map_lanes:
             roads = np.zeros_like(roads, dtype=np.float32)
 

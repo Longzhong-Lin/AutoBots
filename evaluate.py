@@ -3,6 +3,7 @@ import random
 import numpy as np
 import torch
 from matplotlib import pyplot as plt
+import seaborn as sns
 from datasets.argoverse.dataset import ArgoH5Dataset
 from datasets.interaction_dataset.dataset import InteractionDataset
 from datasets.nuscenes.dataset import NuscenesH5Dataset
@@ -192,8 +193,8 @@ class Evaluator:
                     orig_ego_in = orig_ego_in.float().to(self.device)
                     orig_agents_in = orig_agents_in.float().to(self.device)
 
-                ego_in, ego_out, agents_in, agents_out, context_img, agent_types = self._data_to_device(data)
-                pred_obs, mode_probs = self.autobot_model(ego_in, agents_in, context_img, agent_types)
+                ego_in, ego_out, agents_in, agents_out, context_img, agent_types, relative_pose = self._data_to_device(data)
+                pred_obs, mode_probs = self.autobot_model(ego_in, agents_in, context_img, agent_types, relative_pose)
 
                 if self.interact_eval:
                     pred_obs = interpolate_trajectories(pred_obs)
@@ -240,6 +241,12 @@ class Evaluator:
                 total_collisions = np.concatenate(total_collisions).mean()
                 print("Scene Collision Rate", total_collisions)
 
+            with open(os.path.join(self.model_dirname, 'evaluate_result.txt'), 'a+') as f:
+                print("Marg. minADE c:", val_minade_c[0], "Marg. minFDE c:", val_minfde_c[0], file=f)
+                print("Scene minADE c:", val_sminade_c[0], "Scene minFDE c:", val_sminfde_c[0], file=f)
+                if self.interact_eval:
+                    print("Scene Collision Rate", total_collisions, file=f)
+
     def autobotjoint_visualize(self, index):
         with torch.no_grad():
             val_marg_ade_losses = []
@@ -260,7 +267,7 @@ class Evaluator:
                 orig_agents_in = orig_agents_in.float().to(self.device)
 
             ego_in, ego_out, agents_in, agents_out, context_img, agent_types, relative_pose = self._data_to_device(data)
-            pred_obs, mode_probs = self.autobot_model(ego_in, agents_in, context_img, agent_types, relative_pose)
+            pred_obs, mode_probs, w_soc_enc, w_soc_dec = self.autobot_model(ego_in, agents_in, context_img, agent_types, relative_pose, visualize=True)
 
             if self.interact_eval:
                 pred_obs = interpolate_trajectories(pred_obs)
@@ -309,6 +316,25 @@ class Evaluator:
                 ax[row, col].grid('off')
             os.makedirs(os.path.join(self.model_dirname, 'visual'), exist_ok=True)
             plt.savefig(os.path.join(self.model_dirname, f'visual/test_{index}.png'), dpi=300)
+
+            # Weights Heatmap
+            agent_mask = torch.cat((orig_ego_in, orig_agents_in[0].transpose(0, 1)), dim=0)[..., -1]
+            agent_mask = agent_mask.transpose(0, 1).unsqueeze(-1)#.repeat(1, 1, 41)
+            print(agent_mask)
+
+            plt.figure()
+            sns.heatmap(torch.norm(relative_pose[0, -1, :4, :4, :2], dim=-1).cpu())
+            # print(relative_pose[0, -1, 6, 0, :2])
+            # print(relative_pose[0, -1, 0, 6, :2])
+            plt.savefig(os.path.join(self.model_dirname, f'visual/test_{index}_rel_pos.png'), dpi=300)
+
+            plt.figure()
+            sns.heatmap(w_soc_enc[0][0,-1].cpu())
+            plt.savefig(os.path.join(self.model_dirname, f'visual/test_{index}_w_soc_enc.png'), dpi=300)
+
+            plt.figure()
+            sns.heatmap(w_soc_dec[0][0,0,-1].cpu())
+            plt.savefig(os.path.join(self.model_dirname, f'visual/test_{index}_w_soc_dec_final.png'), dpi=300)
 
             # Marginal metrics
             ade_losses, fde_losses = self._compute_marginal_errors(pred_obs, ego_out, agents_out, agents_in)
@@ -398,4 +424,4 @@ if __name__ == '__main__':
     #     index = random.randint(0, 11793)
     #     print(f"plot {index} >>>>>>>>>")
     #     evaluator.visualize(index)
-    evaluator.visualize(index=8644)
+    evaluator.visualize(index=2222)

@@ -330,12 +330,22 @@ class InteractionDataset(Dataset):
         roads = self.copy_agent_roads_across_agents(agents_in, roads)
         if idx == 7777 and False:
             # print(ego_in.shape, ego_out.shape, agents_in.shape, agents_out.shape)
-            ego_in[:, 0] = agents_out[0, 10, 0]
-            ego_in[:, 1] = agents_out[0, 10, 1]
-            ego_in[:, 2:5] = 0
-            ego_out[:, 0] = agents_out[0, 10, 0]
-            ego_out[:, 1] = agents_out[0, 10, 1]
-            ego_out[:, 2] = 0
+            # ego_in[:, 0] += 20
+            # ego_out[:, 0] += 20
+            # ego_in[:, 1] += 10
+            # ego_out[:, 1] += 10
+            old_ego_in = ego_in.copy()
+            old_ego_out = ego_out.copy()
+            rot_angle = -old_ego_in[-1, 4]
+            ego_in[:, :2] = self.convert_global_coords_to_local(coordinates=old_ego_in[:, :2] - old_ego_in[-1, :2], yaw=rot_angle)
+            ego_in[:, 0] += 100
+            ego_in[:, 1] += 52
+            ego_in[:, 2:4] = self.convert_global_coords_to_local(coordinates=old_ego_in[:, 2:4], yaw=rot_angle)
+            ego_in[:, 4] += rot_angle
+            ego_out[:, :2] = self.convert_global_coords_to_local(coordinates=old_ego_out[:, :2] - old_ego_in[-1, :2], yaw=rot_angle)
+            ego_out[:, 0] += 100
+            ego_out[:, 1] += 52
+            ego_out[:, 2] += rot_angle
 
         # normalize scenes so all agents are going up
         if self.evaluation:

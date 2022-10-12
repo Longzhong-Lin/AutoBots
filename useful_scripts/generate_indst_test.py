@@ -243,14 +243,34 @@ def rotate_agents(ego_in, agents_in, roads, agent_types):
         new_roads[n + 1, :, :, :2] = convert_global_coords_to_local(coordinates=new_roads[n + 1, :, :, :2] - translation, yaw=angle_of_rotation)
         new_roads[n + 1][np.where(new_roads[n + 1, :, :, -1] == 0)] = 0.0
 
-    return new_ego_in, new_agents_in, new_roads
+    # relative position
+    agents_in_all = np.concatenate((np.expand_dims(ego_in, 0), agents_in), axis=0)
+    A, T, _ = agents_in_all.shape
+    relative_pose = np.zeros((T, A, A, 4), dtype=np.float32)
+    for t in range(T):
+        for a in range(A):
+            if not agents_in_all[a, t, -1]:
+                continue
+            if agent_types[a, 0]: # vehicle
+                yaw = agents_in_all[a, t, 4]
+            elif agent_types[a, 1]: # pedestrian/bike
+                diff = agents_in_all[a, t, 2:4]
+                yaw = np.arctan2(diff[1], diff[0])
+            angle_of_rotation = (np.pi / 2) + np.sign(-yaw) * np.abs(yaw)
+            translation = agents_in_all[a, t, :2]
+            relative_pose[t, a, :, :2] = convert_global_coords_to_local(coordinates=agents_in_all[:, t, :2]-translation, yaw=angle_of_rotation)
+            direction = np.arctan2(agents_in_all[:, t, 3], agents_in_all[:, t, 2])
+            relative_pose[t, a, :, 2] = np.cos(direction - yaw)
+            relative_pose[t, a, :, 3] = np.sin(direction - yaw)
 
+    return new_ego_in, new_agents_in, new_roads, relative_pose
 
-def data_to_tensor(ego_in, agents_in, agent_roads, agent_types):
+def data_to_tensor(ego_in, agents_in, agent_roads, agent_types, relative_pose):
     return torch.from_numpy(ego_in).float().to(device).unsqueeze(0), \
            torch.from_numpy(agents_in).float().to(device).unsqueeze(0), \
            torch.from_numpy(agent_roads).float().to(device).unsqueeze(0), \
-           torch.from_numpy(agent_types).float().to(device).unsqueeze(0)
+           torch.from_numpy(agent_types).float().to(device).unsqueeze(0), \
+           torch.from_numpy(relative_pose).float().to(device).unsqueeze(0)
 
 
 def get_args():
@@ -324,14 +344,16 @@ if __name__ == '__main__':
             ego_in, agents_in = get_ego_and_agents(scene_trajectories)
             agent_roads = copy_agent_roads_across_agents(agents_in, roads)
             translations = np.expand_dims(np.concatenate((ego_in[-1:, :2], agents_in[:, -1, :2]), axis=0), axis=0)
-            ego_in, agents_in, agent_roads = rotate_agents(ego_in, agents_in, agent_roads, scene_agent_types)
+            ego_in, agents_in, agent_roads, relative_pose = rotate_agents(ego_in, agents_in, agent_roads, scene_agent_types)
 
             # downsample inputs across time
             ego_in = ego_in[1::2]
             agents_in = agents_in[:, 1::2].transpose(1, 0, 2)
+            relative_pose[:-1] = relative_pose[-1] # take only current relative pose
+            relative_pose = relative_pose[1::2]
 
             # prepare inputs for model
-            ego_in, agents_in, agent_roads, agent_types = data_to_tensor(ego_in, agents_in, agent_roads, scene_agent_types)
+            ego_in, agents_in, agent_roads, agent_types, relative_pose = data_to_tensor(ego_in, agents_in, agent_roads, scene_agent_types, relative_pose)
             model_ego_in = ego_in.clone()
             model_ego_in[:, :, 3:5] = 0
             model_agents_in = agents_in.clone()
@@ -344,7 +366,7 @@ if __name__ == '__main__':
             # generate predictions using model'
             with torch.no_grad():
                 autobot_model._M = model_agents_in.shape[2]
-                pred_obs, mode_probs = autobot_model(model_ego_in, model_agents_in, agent_roads, agent_types)
+                pred_obs, mode_probs = autobot_model(model_ego_in, model_agents_in, agent_roads, agent_types, relative_pose)
             pred_obs = interpolate_trajectories(pred_obs)
             pred_obs = yaw_from_predictions(pred_obs, ego_in, agents_in)
             scene_collisions, new_preds, vehicles_only = collisions_for_inter_dataset(pred_obs.cpu().numpy(),

@@ -38,13 +38,12 @@ class Trainer:
         self.initialize_model()
         self.optimiser = optim.Adam(self.autobot_model.parameters(), lr=self.args.learning_rate,
                                     eps=self.args.adam_epsilon)
-        self.optimiser_scheduler = MultiStepLR(self.optimiser, milestones=args.learning_rate_sched, gamma=0.1,
-                                               verbose=True)
-        # self.optimiser_scheduler = CosineAnnealingLR(
-        #     self.optimiser,
-        #     T_max=self.args.num_epochs,
-        #     verbose=True
-        # )
+        # self.optimiser_scheduler = MultiStepLR(self.optimiser, milestones=args.learning_rate_sched, gamma=0.1, verbose=True)
+        self.optimiser_scheduler = CosineAnnealingLR(
+            self.optimiser,
+            T_max=self.args.num_epochs,
+            verbose=True
+        )
 
         self.writer = SummaryWriter(log_dir=os.path.join(self.results_dirname, "tb_files"))
         self.smallest_minade_k = 5.0  # for computing best models

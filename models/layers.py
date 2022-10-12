@@ -111,6 +111,7 @@ class SocialAttention(nn.Module):
         self.rel_mlp = nn.Sequential(
             nn.Linear(rel_dim, 512, bias=True), nn.ReLU(inplace=True),
             nn.Linear(512, num_heads, bias=False)
+            # nn.Linear(512, head_dim * 3, bias=False)
         )
 
         self.feedforward = nn.Sequential(
@@ -123,7 +124,7 @@ class SocialAttention(nn.Module):
         self.norm1 = nn.LayerNorm(dim)
         self.norm2 = nn.LayerNorm(dim)
 
-    def forward(self, x, mask=None, relation=None):
+    def forward(self, x, mask=None, relation=None, return_weights=False):
         """
         :param x: (B, A, D)
         :param mask: (B, A)
@@ -141,6 +142,14 @@ class SocialAttention(nn.Module):
             rel_emb = self.rel_mlp(relation).permute(0, 3, 1, 2) # (B, nH, A, A)
             rel_bias = 16 * torch.sigmoid(rel_emb)
             attn = attn + rel_bias
+        # q = q * self.scale
+        # attn = (q @ k.transpose(-2, -1)) # (B, nH, A, A)
+        # if relation is not None:
+        #     rel_emb = self.rel_mlp(relation).reshape(B, 1, A, A, D//self.num_heads, 3).repeat(1, self.num_heads, 1, 1, 1, 1) # (B, nH, A, A, dH, 3)
+        #     rel_q = (q.unsqueeze(3) * rel_emb[..., 0]).sum(-1)
+        #     rel_k = ((k*self.scale).unsqueeze(2) * rel_emb[..., 1]).sum(-1)
+        #     rel_v = rel_emb[..., 2]
+        #     attn = attn + rel_q + rel_k
         if mask is not None:
             mask_add = torch.zeros_like(mask, dtype=torch.float)
             mask_add = torch.masked_fill(mask_add, mask, float('-inf'))
@@ -150,6 +159,10 @@ class SocialAttention(nn.Module):
             attn = self.softmax(attn)
         attn = self.attn_drop(attn)
         x = (attn @ v).transpose(1, 2).reshape(B, A, D)
+        # x = attn @ v
+        # if relation is not None:
+        #     x = x + (attn.unsqueeze(-1) * rel_v).sum(-2)
+        # x = x.transpose(1, 2).reshape(B, A, D)
         x = self.dropout1(x)
         x = self.norm1(x + res_attn)
 
@@ -159,7 +172,11 @@ class SocialAttention(nn.Module):
         x = self.dropout2(x)
         x = self.norm2(x + res_ff)
 
-        return x
+        if return_weights:
+            attn = attn.mean(1)
+            return x, attn
+        else:
+            return x
 
 
 class TransformerEncoderLayer(Module):

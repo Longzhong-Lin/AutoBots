@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from models.context_encoders import MapEncoderPtsMA
-from models.layers import SocialAttention, TransformerEncoderLayer, TransformerEncoder
+from models.layers import TransformerEncoderLayer, TransformerEncoder
 
 
 def init(module, weight_init, bias_init, gain=1):
@@ -105,13 +105,12 @@ class AutoBotJoint(nn.Module):
         self.social_attn_layers = []
         self.temporal_attn_layers = []
         for _ in range(self.L_enc):
-            tx_encoder_layer = TransformerEncoderLayer(d_model=self.d_k, nhead=self.num_heads,
+            tx_encoder_layer = nn.TransformerEncoderLayer(d_model=self.d_k, nhead=self.num_heads,
                                                           dropout=self.dropout, dim_feedforward=self.tx_hidden_size)
-            self.temporal_attn_layers.append(TransformerEncoder(tx_encoder_layer, num_layers=2))
-            # tx_encoder_layer = TransformerEncoderLayer(d_model=self.d_k, nhead=self.num_heads,
-            #                                               dropout=self.dropout, dim_feedforward=self.tx_hidden_size)
-            # self.social_attn_layers.append(TransformerEncoder(tx_encoder_layer, num_layers=1))
-            self.social_attn_layers.append(SocialAttention(dim=self.d_k, num_heads=self.num_heads, dropout=self.dropout))
+            self.temporal_attn_layers.append(nn.TransformerEncoder(tx_encoder_layer, num_layers=2))
+            tx_encoder_layer = TransformerEncoderLayer(d_model=self.d_k, rel_dim=4, nhead=self.num_heads,
+                                                          dropout=self.dropout, dim_feedforward=self.tx_hidden_size)
+            self.social_attn_layers.append(TransformerEncoder(tx_encoder_layer, num_layers=1))
 
         self.temporal_attn_layers = nn.ModuleList(self.temporal_attn_layers)
         self.social_attn_layers = nn.ModuleList(self.social_attn_layers)
@@ -138,10 +137,9 @@ class AutoBotJoint(nn.Module):
             tx_decoder_layer = nn.TransformerDecoderLayer(d_model=self.d_k, nhead=self.num_heads,
                                                           dropout=self.dropout, dim_feedforward=self.tx_hidden_size)
             self.temporal_attn_decoder_layers.append(nn.TransformerDecoder(tx_decoder_layer, num_layers=2))
-            tx_encoder_layer = TransformerEncoderLayer(d_model=self.d_k, nhead=self.num_heads,
+            tx_encoder_layer = TransformerEncoderLayer(d_model=self.d_k, rel_dim=4, nhead=self.num_heads,
                                                           dropout=self.dropout, dim_feedforward=self.tx_hidden_size)
             self.social_attn_decoder_layers.append(TransformerEncoder(tx_encoder_layer, num_layers=1))
-            # self.social_attn_decoder_layers.append(SocialAttention(dim=self.d_k, num_heads=self.num_heads, dropout=self.dropout))
 
         self.temporal_attn_decoder_layers = nn.ModuleList(self.temporal_attn_decoder_layers)
         self.social_attn_decoder_layers = nn.ModuleList(self.social_attn_decoder_layers)
@@ -191,11 +189,10 @@ class AutoBotJoint(nn.Module):
         B = agent_masks.size(0)
         agent_masks = agent_masks.permute(0, 2, 1).reshape(-1, T_obs)
         agent_masks[:, -1][agent_masks.sum(-1) == T_obs] = False  # Ensure agent's that don't exist don't throw NaNs.
-        agents_temp_emb = layer(self.pos_encoder(agents_emb.reshape(T_obs, B * (self._M + 1), -1)),
-                                src_key_padding_mask=agent_masks, return_weights=False)[0]
+        agents_temp_emb = layer(self.pos_encoder(agents_emb.reshape(T_obs, B * (self._M + 1), -1)), src_key_padding_mask=agent_masks)
         return agents_temp_emb.view(T_obs, B, self._M+1, -1)
 
-    def social_attn_fn(self, agents_emb, agent_masks, relative_pose, layer):
+    def social_attn_fn(self, agents_emb, agent_masks, relative_pose, layer, visual=False):
         '''
         :param agents_emb: (T, B, N, H)
         :param agent_masks: (B, T, N)
@@ -203,16 +200,16 @@ class AutoBotJoint(nn.Module):
         '''
         T_obs = agents_emb.size(0)
         B = agent_masks.size(0)
-        # agents_emb = agents_emb.permute(2, 1, 0, 3).reshape(self._M + 1, B * T_obs, -1)
-        # agents_soc_emb, weights = layer(agents_emb, src_key_padding_mask=agent_masks.view(-1, self._M+1), return_weights=True)
-        # agents_soc_emb = agents_soc_emb.view(self._M+1, B, T_obs, -1).permute(2, 1, 0, 3)
-        # weights = [w.view(B, T_obs, self._M+1, self._M+1) for w in weights]
-        agents_emb = agents_emb.permute(2, 1, 0, 3).reshape(self._M + 1, B * T_obs, -1).transpose(0, 1)
+        agents_emb = agents_emb.permute(2, 1, 0, 3).reshape(self._M+1, B * T_obs, -1)
         if relative_pose is not None:
-            relative_pose = relative_pose.reshape(B*T_obs, self._M + 1, self._M + 1, 4)
-        agents_soc_emb, agents_soc_w = layer(agents_emb, mask=agent_masks.view(-1, self._M+1), relation=relative_pose, return_weights=True)
-        agents_soc_emb = agents_soc_emb.transpose(0, 1).view(self._M+1, B, T_obs, -1).permute(2, 1, 0, 3)
-        weights = [agents_soc_w.view(B, T_obs, self._M+1, self._M+1)]
+            relative_pose = relative_pose[:, -1:].repeat(1, T_obs, 1, 1, 1).reshape(B*T_obs, self._M+1, self._M+1, 4)
+        agents_soc_emb, weights = layer(
+            agents_emb, relation=relative_pose, src_key_padding_mask=agent_masks.view(-1, self._M+1),
+            return_weights=visual
+        )
+        agents_soc_emb = agents_soc_emb.view(self._M+1, B, T_obs, -1).permute(2, 1, 0, 3)
+        if visual:
+            weights = [w.view(B, T_obs, self._M+1, self._M+1) for w in weights]
         return agents_soc_emb, weights
 
     def temporal_attn_decoder_fn(self, agents_emb, context, agent_masks, layer):
@@ -235,7 +232,7 @@ class AutoBotJoint(nn.Module):
 
         return agents_temp_emb
 
-    def social_attn_decoder_fn(self, agents_emb, agent_masks, relative_pose, layer):
+    def social_attn_decoder_fn(self, agents_emb, agent_masks, relative_pose, layer, visual=False):
         '''
         :param agents_emb: (T, BK, N, H)
         :param agent_masks: (BK, T, N)
@@ -244,16 +241,16 @@ class AutoBotJoint(nn.Module):
         BK = agent_masks.size(0)
         agent_masks = agent_masks[:, -1:].repeat(1, self.T, 1).view(-1, self._M + 1)  # take last timestep of all agents.
         agents_emb = agents_emb.permute(2, 1, 0, 3).reshape(self._M + 1, BK * self.T, -1)
-        agents_soc_emb, weights = layer(agents_emb, src_key_padding_mask=agent_masks, return_weights=True)
+        if relative_pose is not None:
+            relative_pose = relative_pose[:, -1:].repeat(1, self.T, 1, 1, 1)
+            relative_pose = relative_pose.unsqueeze(1).repeat(1, self.c, 1, 1, 1, 1).reshape(BK*self.T, self._M+1, self._M+1, 4)
+        agents_soc_emb, weights = layer(
+            agents_emb, relation=relative_pose, src_key_padding_mask=agent_masks,
+            return_weights=visual
+        )
         agents_soc_emb = agents_soc_emb.view(self._M + 1, BK, self.T, -1).permute(2, 1, 0, 3)
-        weights = [w.view(BK, self.T, self._M + 1, self._M + 1) for w in weights]
-        # agents_emb = agents_emb.permute(2, 1, 0, 3).reshape(self._M + 1, BK * self.T, -1).transpose(0, 1)
-        # if relative_pose is not None:
-        #     relative_pose = relative_pose[:, -1:].repeat(1, self.T, 1, 1, 1)
-        #     relative_pose = relative_pose.unsqueeze(1).repeat(1, self.c, 1, 1, 1, 1).reshape(BK*self.T, self._M + 1, self._M + 1, 4)
-        # agents_soc_emb = layer(agents_emb, mask=agent_masks.view(-1, self._M+1), relation=relative_pose)
-        # agents_soc_emb = agents_soc_emb.transpose(0, 1).view(self._M+1, BK, self.T, -1).permute(2, 1, 0, 3)
-        # weights = list()
+        if visual:
+            weights = [w.view(BK, self.T, self._M + 1, self._M + 1) for w in weights]
         return agents_soc_emb, weights
 
     def forward(self, ego_in, agents_in, roads, agent_types, relative_pose=None, visualize=False):
@@ -312,7 +309,6 @@ class AutoBotJoint(nn.Module):
 
             agents_dec_emb = self.temporal_attn_decoder_fn(agents_dec_emb, context, opps_masks_modes, layer=self.temporal_attn_decoder_layers[d])
             agents_dec_emb, w_soc_dec = self.social_attn_decoder_fn(agents_dec_emb, opps_masks_modes, relative_pose, layer=self.social_attn_decoder_layers[d])
-            w_soc_dec = [w.view(B, self.c, self.T, self._M + 1, self._M + 1) for w in w_soc_dec]
 
         out_dists = self.output_model(agents_dec_emb.reshape(self.T, -1, self.d_k))
         out_dists = out_dists.reshape(self.T, B, self.c, self._M+1, -1).permute(2, 0, 1, 3, 4)

@@ -98,8 +98,9 @@ class PositionalEncoding(nn.Module):
 
 
 class SocialAttention(nn.Module):
-    def __init__(self, dim, num_heads, rel_dim=4, qkv_bias=True, qk_scale=None, dropout=0.0):
+    def __init__(self, dim, num_heads, rel_dim=4, qkv_bias=True, qk_scale=None, dropout=0.0, batch_first=True):
         super().__init__()
+        self.batch_first = batch_first
         self.num_heads = num_heads
         head_dim = dim // num_heads
         self.scale = qk_scale or head_dim ** -0.5
@@ -110,19 +111,11 @@ class SocialAttention(nn.Module):
 
         self.rel_mlp = nn.Sequential(
             nn.Linear(rel_dim, 512, bias=True), nn.ReLU(inplace=True),
-            nn.Linear(512, num_heads, bias=False)
-            # nn.Linear(512, head_dim * 3, bias=False)
+            # nn.Linear(512, num_heads, bias=False)
+            nn.Linear(512, head_dim * 3, bias=False)
         )
 
-        self.feedforward = nn.Sequential(
-            nn.Linear(dim, dim * 3), nn.ReLU(inplace=True), nn.Dropout(dropout),
-            nn.Linear(dim * 3, dim), 
-        )
-
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(dropout)
-        self.norm1 = nn.LayerNorm(dim)
-        self.norm2 = nn.LayerNorm(dim)
+        self.out_proj = nn.Linear(dim, dim)
 
     def forward(self, x, mask=None, relation=None, return_weights=False):
         """
@@ -130,26 +123,24 @@ class SocialAttention(nn.Module):
         :param mask: (B, A)
         :param relation: (B, A, A, 4)
         """
+        if not self.batch_first:
+            x = x.transpose(0, 1)
         B, A, D = x.shape
 
         # attention block
-        res_attn = x
         qkv = self.qkv(x).reshape(B, A, 3, self.num_heads, D // self.num_heads).permute(2, 0, 3, 1, 4) # (3, B, nH, A, dH)
         q, k, v = qkv[0], qkv[1], qkv[2] # (B, nH, A, dH)
         q = q * self.scale
         attn = (q @ k.transpose(-2, -1)) # (B, nH, A, A)
         if relation is not None:
-            rel_emb = self.rel_mlp(relation).permute(0, 3, 1, 2) # (B, nH, A, A)
-            rel_bias = 16 * torch.sigmoid(rel_emb)
-            attn = attn + rel_bias
-        # q = q * self.scale
-        # attn = (q @ k.transpose(-2, -1)) # (B, nH, A, A)
-        # if relation is not None:
-        #     rel_emb = self.rel_mlp(relation).reshape(B, 1, A, A, D//self.num_heads, 3).repeat(1, self.num_heads, 1, 1, 1, 1) # (B, nH, A, A, dH, 3)
-        #     rel_q = (q.unsqueeze(3) * rel_emb[..., 0]).sum(-1)
-        #     rel_k = ((k*self.scale).unsqueeze(2) * rel_emb[..., 1]).sum(-1)
-        #     rel_v = rel_emb[..., 2]
-        #     attn = attn + rel_q + rel_k
+            # rel_emb = self.rel_mlp(relation).permute(0, 3, 1, 2) # (B, nH, A, A)
+            # rel_bias = 16 * torch.sigmoid(rel_emb)
+            # attn = attn + rel_bias
+            rel_emb = self.rel_mlp(relation).reshape(B, 1, A, A, D//self.num_heads, 3).repeat(1, self.num_heads, 1, 1, 1, 1) # (B, nH, A, A, dH, 3)
+            rel_q = (q.unsqueeze(3) * rel_emb[..., 0]).sum(-1)
+            rel_k = ((k*self.scale).unsqueeze(2) * rel_emb[..., 1]).sum(-1)
+            rel_v = rel_emb[..., 2]
+            attn = attn + rel_q + rel_k
         if mask is not None:
             mask_add = torch.zeros_like(mask, dtype=torch.float)
             mask_add = torch.masked_fill(mask_add, mask, float('-inf'))
@@ -158,25 +149,21 @@ class SocialAttention(nn.Module):
         else:
             attn = self.softmax(attn)
         attn = self.attn_drop(attn)
-        x = (attn @ v).transpose(1, 2).reshape(B, A, D)
-        # x = attn @ v
-        # if relation is not None:
-        #     x = x + (attn.unsqueeze(-1) * rel_v).sum(-2)
-        # x = x.transpose(1, 2).reshape(B, A, D)
-        x = self.dropout1(x)
-        x = self.norm1(x + res_attn)
+        # x = (attn @ v).transpose(1, 2).reshape(B, A, D)
+        x = attn @ v
+        if relation is not None:
+            x = x + (attn.unsqueeze(-1) * rel_v).sum(-2)
+        x = x.transpose(1, 2).reshape(B, A, D)
+        x = self.out_proj(x)
 
-        # feedforward block
-        res_ff = x
-        x = self.feedforward(x)
-        x = self.dropout2(x)
-        x = self.norm2(x + res_ff)
-
+        if not self.batch_first:
+            x = x.transpose(0, 1)
+            
         if return_weights:
             attn = attn.mean(1)
             return x, attn
         else:
-            return x
+            return x, None
 
 
 class TransformerEncoderLayer(Module):
@@ -212,13 +199,14 @@ class TransformerEncoderLayer(Module):
     """
     __constants__ = ['batch_first', 'norm_first']
 
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation=F.relu,
+    def __init__(self, d_model, rel_dim, nhead, dim_feedforward=2048, dropout=0.1, activation=F.relu,
                  layer_norm_eps=1e-5, batch_first=False, norm_first=False,
                  device=None, dtype=None) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
         super(TransformerEncoderLayer, self).__init__()
-        self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=batch_first,
-                                            **factory_kwargs)
+        # self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=batch_first,
+        #                                     **factory_kwargs)
+        self.self_attn = SocialAttention(dim=d_model, rel_dim=rel_dim, num_heads=nhead, dropout=dropout, batch_first=batch_first)
         # Implementation of Feedforward model
         self.linear1 = Linear(d_model, dim_feedforward, **factory_kwargs)
         self.dropout = Dropout(dropout)
@@ -241,7 +229,7 @@ class TransformerEncoderLayer(Module):
             state['activation'] = F.relu
         super(TransformerEncoderLayer, self).__setstate__(state)
 
-    def forward(self, src: Tensor, src_mask: Optional[Tensor] = None, src_key_padding_mask: Optional[Tensor] = None, return_weights: bool = False) -> Tensor:
+    def forward(self, src: Tensor, src_mask: Optional[Tensor] = None, src_key_padding_mask: Optional[Tensor] = None, relation: Optional[Tensor] = None, return_weights: bool = False) -> Tensor:
         r"""Pass the input through the encoder layer.
 
         Args:
@@ -257,11 +245,11 @@ class TransformerEncoderLayer(Module):
 
         x = src
         if self.norm_first:
-            x_attn, w = self._sa_block(self.norm1(x), src_mask, src_key_padding_mask, return_weights)
+            x_attn, w = self._sa_block(self.norm1(x), src_mask, src_key_padding_mask, relation, return_weights)
             x = x + x_attn
             x = x + self._ff_block(self.norm2(x))
         else:
-            x_attn, w = self._sa_block(x, src_mask, src_key_padding_mask, return_weights)
+            x_attn, w = self._sa_block(x, src_mask, src_key_padding_mask, relation, return_weights)
             x = self.norm1(x + x_attn)
             x = self.norm2(x + self._ff_block(x))
 
@@ -269,12 +257,13 @@ class TransformerEncoderLayer(Module):
 
     # self-attention block
     def _sa_block(self, x: Tensor,
-                  attn_mask: Optional[Tensor], key_padding_mask: Optional[Tensor],
+                  attn_mask: Optional[Tensor], key_padding_mask: Optional[Tensor], relation: Optional[Tensor],
                   need_weights: bool) -> Tensor:
-        x, w = self.self_attn(x, x, x,
-                           attn_mask=attn_mask,
-                           key_padding_mask=key_padding_mask,
-                           need_weights=need_weights)
+        # x, w = self.self_attn(x, x, x,
+        #                    attn_mask=attn_mask,
+        #                    key_padding_mask=key_padding_mask,
+        #                    need_weights=need_weights)
+        x, w = self.self_attn(x, mask=key_padding_mask, relation=relation, return_weights=need_weights)
         return self.dropout1(x), w
 
     # feed forward block
@@ -305,7 +294,7 @@ class TransformerEncoder(Module):
         self.num_layers = num_layers
         self.norm = norm
 
-    def forward(self, src: Tensor, mask: Optional[Tensor] = None, src_key_padding_mask: Optional[Tensor] = None, return_weights: bool = False) -> Tensor:
+    def forward(self, src: Tensor, mask: Optional[Tensor] = None, src_key_padding_mask: Optional[Tensor] = None, relation: Optional[Tensor] = None, return_weights: bool = False) -> Tensor:
         r"""Pass the input through the encoder layers in turn.
 
         Args:
@@ -319,7 +308,7 @@ class TransformerEncoder(Module):
         output = src
         weights = list()
         for mod in self.layers:
-            output, layer_weights = mod(output, src_mask=mask, src_key_padding_mask=src_key_padding_mask, return_weights=return_weights)
+            output, layer_weights = mod(output, src_mask=mask, src_key_padding_mask=src_key_padding_mask, relation=relation, return_weights=return_weights)
             weights.append(layer_weights)
 
         if self.norm is not None:
@@ -340,10 +329,3 @@ def _get_activation_fn(activation):
 def _get_clones(module, N):
     return ModuleList([copy.deepcopy(module) for i in range(N)])
 
-
-if __name__ == "__main__":
-    social_attn_layer = SocialAttention(dim=128, num_heads=16).cuda()
-    x = torch.randn(4, 9, 128).cuda()
-    mask = ((torch.rand(4, 9)-0.5) > 0).cuda()
-    relation = torch.randn(4, 9, 9, 4).cuda()
-    social_attn_layer(x, mask, relation)
